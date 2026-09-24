@@ -1,0 +1,11 @@
+Creating test database for alias 'default'...
+........................
+----------------------------------------------------------------------
+Ran 24 tests in 65.548s
+
+OK
+Destroying test database for alias 'default'...
+⚠️ Firebase non initialisé en local (fichier credentials manquant).
+⚠️ Attention: Fichier firebase_credentials.json introuvable. Les notifications ne fonctionneront pas.
+Found 24 test(s).
+System check identified no issues (0 silenced).

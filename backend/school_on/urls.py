@@ -29,11 +29,15 @@ urlpatterns = [
     path('api/', include('utilisateurs.urls')),
     path('api/courses/', include('courses.urls')),
     path('api/payments/', include('payments.urls')),
+<<<<<<< Updated upstream:backend/school_on/urls.py
     path('api/notifications/', include('notifications.urls')),
     path('api/certificates/', include('certificates.urls')),
     path('api/community/', include('forum.urls')),
     path('api/courses/<int:course_id>/certification-status/', CertificationStatusView.as_view(), name='course-certification-status'),
     path('api/public/certificates/verify/<str:certificate_id>/', VerifyCertificateView.as_view(), name='public-certificate-verification'),
+=======
+    path('api/community/', include('forum.urls')),
+>>>>>>> Stashed changes:school_on/urls.py
     
     path('schema/', SpectacularAPIView.as_view(), name='schema'),
     path('swagger/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),

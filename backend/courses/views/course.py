@@ -1,8 +1,8 @@
-from decimal import Decimal, InvalidOperation
+from datetime import timedelta
 import random
 
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.utils import timezone
 from rest_framework import serializers, viewsets, permissions, status
 from rest_framework.decorators import action
@@ -15,13 +15,24 @@ from ..models import (
     Question, Choice, Enrollment, LessonProgress, QuizAttempt,
     AttemptAnswer, ContentBlock, LearnerQuestion, CourseReview
 )
+<<<<<<< Updated upstream:backend/courses/views/course.py
 from notifications.services import notify_course_published, notify_course_rejected, notify_quiz_result
 from certificates.services import issue_certificate_if_eligible
+=======
+from ..permissions import user_can_edit_course, user_can_edit_quiz
+from ..services import attempt_duration, build_attempt_answers, grade_attempt
+from ..views.mixins import ReorderMixin
+>>>>>>> Stashed changes:courses/views/course.py
 from ..serializers import (
     CategorySerializer, CourseListSerializer, CourseDetailSerializer,
     LessonSerializer, QuizSerializer, QuizCreateSerializer, QuizSubmitSerializer,
     EnrollmentSerializer, ContentBlockSerializer, LearnerQuestionSerializer, StateExamSerializer, ArchiveResourceSerializer,
+<<<<<<< Updated upstream:backend/courses/views/course.py
     LearnerQuestionAnswerSerializer, CourseReviewSerializer
+=======
+    LearnerQuestionAnswerSerializer, QuizQuestionLearnerSerializer, QuizQuestionStaffSerializer,
+    QuizQuestionWriteSerializer,
+>>>>>>> Stashed changes:courses/views/course.py
 )
 
 
@@ -60,6 +71,27 @@ class StateExamViewSet(viewsets.ModelViewSet):
         exam.save(update_fields=['status', 'review_note', 'updated_at'])
         return Response(StateExamSerializer(exam).data)
 
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAdminUser])
+    def approve(self, request, pk=None):
+        exam = self.get_object()
+        if exam.status != 'SUBMITTED':
+            return Response({'detail': 'Seul un examen soumis peut être publié.'}, status=status.HTTP_400_BAD_REQUEST)
+        exam.status = 'PUBLISHED'
+        exam.review_note = ''
+        exam.save(update_fields=['status', 'review_note', 'updated_at'])
+        return Response(StateExamSerializer(exam, context={'request': request}).data)
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAdminUser])
+    def reject(self, request, pk=None):
+        exam = self.get_object()
+        note = str(request.data.get('review_note', '')).strip()
+        if len(note) < 10:
+            return Response({'review_note': 'Le motif doit contenir au moins 10 caractères.'}, status=status.HTTP_400_BAD_REQUEST)
+        exam.status = 'DRAFT'
+        exam.review_note = note
+        exam.save(update_fields=['status', 'review_note', 'updated_at'])
+        return Response(StateExamSerializer(exam, context={'request': request}).data)
+
 
 class ArchiveResourceViewSet(viewsets.ModelViewSet):
     queryset = ArchiveResource.objects.select_related('exam', 'exam__creator')
@@ -84,22 +116,22 @@ class ArchiveResourceViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], permission_classes=[permissions.IsAdminUser])
     def approve(self, request, pk=None):
-        exam = self.get_object()
-        exam.status = 'PUBLISHED'
-        exam.review_note = ''
-        exam.save(update_fields=['status', 'review_note', 'updated_at'])
-        return Response(StateExamSerializer(exam).data)
+        resource = self.get_object()
+        resource.exam.status = 'PUBLISHED'
+        resource.exam.review_note = ''
+        resource.exam.save(update_fields=['status', 'review_note', 'updated_at'])
+        return Response(ArchiveResourceSerializer(resource, context={'request': request}).data)
 
     @action(detail=True, methods=['post'], permission_classes=[permissions.IsAdminUser])
     def reject(self, request, pk=None):
-        exam = self.get_object()
+        resource = self.get_object()
         note = str(request.data.get('review_note', '')).strip()
         if len(note) < 10:
             return Response({'review_note': 'Le motif doit contenir au moins 10 caractères.'}, status=status.HTTP_400_BAD_REQUEST)
-        exam.status = 'DRAFT'
-        exam.review_note = note
-        exam.save(update_fields=['status', 'review_note', 'updated_at'])
-        return Response(StateExamSerializer(exam).data)
+        resource.exam.status = 'DRAFT'
+        resource.exam.review_note = note
+        resource.exam.save(update_fields=['status', 'review_note', 'updated_at'])
+        return Response(ArchiveResourceSerializer(resource, context={'request': request}).data)
 
 
 class CourseViewSet(viewsets.ModelViewSet):
@@ -158,6 +190,16 @@ class CourseViewSet(viewsets.ModelViewSet):
         if not self.request.user.is_authenticated or not self.request.user.is_teacher:
             raise PermissionDenied('Seuls les comptes mentor peuvent créer un cours.')
         serializer.save(teacher=self.request.user, status='DRAFT')
+
+    def perform_update(self, serializer):
+        if not user_can_edit_course(self.request.user, serializer.instance):
+            raise PermissionDenied('Vous ne pouvez modifier que votre propre cours.')
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        if not user_can_edit_course(self.request.user, instance):
+            raise PermissionDenied('Vous ne pouvez supprimer que votre propre cours.')
+        instance.delete()
 
     def _review_rules(self, course):
         errors = []
@@ -300,7 +342,13 @@ class LessonViewSet(viewsets.ReadOnlyModelViewSet):
         return Response({'status': 'Leçon marquée comme terminée'}, status=status.HTTP_200_OK)
 
 
-class ContentBlockViewSet(viewsets.ModelViewSet):
+class ContentBlockViewSet(ReorderMixin, viewsets.ModelViewSet):
+    """Blocs de contenu dynamiques d'un chapitre (spec §6).
+
+    - ``GET/POST /api/courses/content-blocks/?chapter=<id>`` ;
+    - ``POST /api/courses/content-blocks/reorder/`` ;
+    - écriture réservée au mentor propriétaire du cours ou à l'admin.
+    """
     queryset = ContentBlock.objects.select_related('chapter__course')
     serializer_class = ContentBlockSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -310,36 +358,79 @@ class ContentBlockViewSet(viewsets.ModelViewSet):
         chapter_id = self.request.query_params.get('chapter')
         if chapter_id:
             queryset = queryset.filter(chapter_id=chapter_id)
-        if self.request.user.is_teacher and not self.request.user.is_staff:
-            queryset = queryset.filter(chapter__course__teacher=self.request.user)
-        return queryset
+        user = self.request.user
+        if user.is_staff:
+            return queryset
+        if user.is_teacher:
+            return queryset.filter(
+                Q(chapter__course__teacher=user) | Q(chapter__course__status='PUBLISHED')
+            ).distinct()
+        return queryset.filter(chapter__course__status='PUBLISHED')
 
     def perform_create(self, serializer):
         chapter = serializer.validated_data['chapter']
-        if not self.request.user.is_staff and chapter.course.teacher_id != self.request.user.id:
+        if not user_can_edit_course(self.request.user, chapter.course):
+            raise PermissionDenied('Vous ne pouvez modifier que votre propre cours.')
+        serializer.save(order=serializer.validated_data.get('order') or chapter.content_blocks.count() + 1)
+
+    def perform_update(self, serializer):
+        if not user_can_edit_course(self.request.user, serializer.instance.chapter.course):
             raise PermissionDenied('Vous ne pouvez modifier que votre propre cours.')
         serializer.save()
 
+    def perform_destroy(self, instance):
+        if not user_can_edit_course(self.request.user, instance.chapter.course):
+            raise PermissionDenied('Vous ne pouvez modifier que votre propre cours.')
+        instance.delete()
+
 
 class LearnerQuestionViewSet(viewsets.ModelViewSet):
-    queryset = LearnerQuestion.objects.select_related('course', 'chapter', 'learner')
+    """Questions posées par les apprenants sur un chapitre (spec §8).
+
+    - un apprenant voit et crée ses propres questions ;
+    - un mentor voit les questions des cours qu'il anime et peut y répondre ;
+    - l'administration voit tout.
+    """
+    queryset = LearnerQuestion.objects.select_related('course', 'chapter', 'learner', 'answered_by')
     serializer_class = LearnerQuestionSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
         queryset = super().get_queryset()
-        if self.request.user.is_teacher and not self.request.user.is_staff:
-            return queryset.filter(course__teacher=self.request.user)
-        return queryset.filter(learner=self.request.user)
+        user = self.request.user
+        if user.is_staff:
+            scoped = queryset
+        elif user.is_teacher:
+            scoped = queryset.filter(course__teacher=user)
+        else:
+            scoped = queryset.filter(learner=user)
+
+        params = self.request.query_params
+        if params.get('course'):
+            scoped = scoped.filter(course_id=params['course'])
+        if params.get('chapter'):
+            scoped = scoped.filter(chapter_id=params['chapter'])
+        if params.get('status'):
+            scoped = scoped.filter(status=params['status'].upper())
+        return scoped
 
     def perform_create(self, serializer):
         chapter = serializer.validated_data['chapter']
-        if chapter.course_id != serializer.validated_data['course'].id:
-            raise serializers.ValidationError({'chapter': 'Ce chapitre n’appartient pas au cours indiqué.'})
-        serializer.save(learner=self.request.user)
+        course = serializer.validated_data.get('course') or chapter.course
+        user = self.request.user
+        if not user.is_staff and course.status != 'PUBLISHED':
+            raise PermissionDenied('Ce cours n’est pas encore ouvert aux questions.')
+        serializer.save(learner=user, course=course)
+
+    def perform_destroy(self, instance):
+        user = self.request.user
+        if not user.is_staff and instance.learner_id != user.id:
+            raise PermissionDenied('Vous ne pouvez supprimer que vos propres questions.')
+        instance.delete()
 
     @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
     def answer(self, request, pk=None):
+        """Le mentor du cours répond à la question de l'apprenant (spec §8)."""
         learner_question = self.get_object()
         if not request.user.is_staff and learner_question.course.teacher_id != request.user.id:
             raise PermissionDenied('Seul le mentor du cours peut répondre.')
@@ -347,123 +438,326 @@ class LearnerQuestionViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         learner_question.answer = serializer.validated_data['answer']
         learner_question.status = 'ANSWERED'
+        learner_question.answered_by = request.user
         learner_question.answered_at = timezone.now()
-        learner_question.save(update_fields=['answer', 'status', 'answered_at'])
+        learner_question.save(update_fields=['answer', 'status', 'answered_by', 'answered_at'])
+        return Response(LearnerQuestionSerializer(learner_question).data)
+
+    @action(detail=False, methods=['get'], url_path='pending-count')
+    def pending_count(self, request):
+        """Nombre de questions en attente pour le mentor connecté (spec §8)."""
+        queryset = self.get_queryset().filter(status='PENDING')
+        by_course = (
+            queryset.values('course', 'course__title')
+            .annotate(total=Count('id'))
+            .order_by('-total')
+        )
+        return Response({
+            'total': queryset.count(),
+            'by_course': [
+                {'course': row['course'], 'course_title': row['course__title'], 'total': row['total']}
+                for row in by_course
+            ],
+        })
+
+    @action(detail=True, methods=['post'])
+    def archive(self, request, pk=None):
+        """Archive une question sans la supprimer (spec §8, statut ARCHIVED)."""
+        learner_question = self.get_object()
+        user = request.user
+        if not user.is_staff and learner_question.course.teacher_id != user.id:
+            raise PermissionDenied('Seul le mentor du cours peut archiver cette question.')
+        learner_question.status = 'ARCHIVED'
+        learner_question.save(update_fields=['status'])
         return Response(LearnerQuestionSerializer(learner_question).data)
 
 
 class QuizViewSet(viewsets.ModelViewSet):
-    """Évaluation interactive et attribution de points XP (Section 5)[cite: 13, 18]."""
-    queryset = Quiz.objects.all()
-    serializer_class = QuizSerializer
+    """Quiz et soumission des tentatives (Learning & Assessment Engine).
+
+    Endpoints :
+    - ``GET    /api/courses/quizzes/``                    liste filtrable ;
+    - ``POST   /api/courses/quizzes/``                    création (métadonnées + questions) ;
+    - ``GET    /api/courses/quizzes/{id}/``               détail (corrigé masqué pour l'apprenant) ;
+    - ``POST   /api/courses/quizzes/{id}/start/``         ouvre une tentative et renvoie les questions ;
+    - ``POST   /api/courses/quizzes/{id}/submit/``        corrige et enregistre la tentative ;
+    - ``POST   /api/courses/quizzes/{id}/questions/``     ajoute une question ;
+    - ``POST   /api/courses/quizzes/{id}/publish/``       publication (admin).
+
+    Filtres de liste : ``quiz_type``, ``course``, ``chapter``, ``category``,
+    ``subject``, ``level``, ``school_level``, ``year``, ``series``, ``status``, ``search``.
+    """
     permission_classes = [permissions.IsAuthenticated]
 
     def get_serializer_class(self):
-        if self.action == 'create':
+        if self.action in {'create', 'update', 'partial_update'}:
             return QuizCreateSerializer
+        if self.action == 'submit':
+            return QuizSubmitSerializer
+        if self.action == 'add_question':
+            return QuizQuestionWriteSerializer
         return QuizSerializer
 
+    def get_queryset(self):
+        queryset = Quiz.objects.select_related('course', 'category', 'created_by').prefetch_related(
+            'questions__choices',
+        )
+        user = self.request.user
+        params = self.request.query_params
+        if params.get('id'):
+            queryset = queryset.filter(id=params['id'])
+        if params.get('course'):
+            queryset = queryset.filter(course_id=params['course'])
+        if params.get('chapter'):
+            queryset = queryset.filter(chapter_id=params['chapter'])
+        if params.get('category'):
+            queryset = queryset.filter(category_id=params['category'])
+        if params.get('quiz_type'):
+            queryset = queryset.filter(quiz_type=params['quiz_type'].upper())
+        if params.get('subject'):
+            queryset = queryset.filter(subject__icontains=params['subject'])
+        if params.get('level'):
+            queryset = queryset.filter(level__iexact=params['level'])
+        if params.get('school_level'):
+            queryset = queryset.filter(school_level__icontains=params['school_level'])
+        if params.get('year'):
+            queryset = queryset.filter(year=params['year'])
+        if params.get('series'):
+            queryset = queryset.filter(series__icontains=params['series'])
+        if params.get('status'):
+            queryset = queryset.filter(status=params['status'].upper())
+        if params.get('search'):
+            queryset = queryset.filter(
+                Q(title__icontains=params['search']) | Q(description__icontains=params['search'])
+            )
+
+        if user.is_staff:
+            return queryset
+        if user.is_teacher:
+            owns = Q(created_by=user) | Q(course__teacher=user)
+            if params.get('mine') == 'true':
+                return queryset.filter(owns).distinct()
+            return queryset.filter(owns | Q(status='PUBLISHED')).distinct()
+        # Côté apprenant : les quiz rattachés à un cours restent visibles au même
+        # titre que via la page de détail du cours (déjà le cas avant cette mise à
+        # jour), tandis que les quiz autonomes (Game / Training / Examen) ne sont
+        # accessibles que s'ils sont publiés.
+        return queryset.filter(Q(status='PUBLISHED') | Q(course__isnull=False))
+
     def perform_create(self, serializer):
-        if not self.request.user.is_teacher:
-            raise PermissionDenied('Seuls les enseignants peuvent créer un quiz.')
-        course = serializer.validated_data['course']
-        if course.teacher_id != self.request.user.id:
+        if not self.request.user.is_teacher and not self.request.user.is_staff:
+            raise PermissionDenied('Seuls les mentors et l’administration peuvent créer un quiz.')
+        course = serializer.validated_data.get('course')
+        if course is not None and not user_can_edit_course(self.request.user, course):
             raise PermissionDenied('Vous ne pouvez créer un quiz que dans votre propre cours.')
         serializer.save()
 
+    def perform_update(self, serializer):
+        if not user_can_edit_quiz(self.request.user, serializer.instance):
+            raise PermissionDenied('Vous ne pouvez modifier que vos propres quiz.')
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        if not user_can_edit_quiz(self.request.user, instance):
+            raise PermissionDenied('Vous ne pouvez supprimer que vos propres quiz.')
+        instance.delete()
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def submit_review(self, request, pk=None):
+        quiz = self.get_object()
+        if not user_can_edit_quiz(request.user, quiz):
+            raise PermissionDenied('Seul le créateur peut soumettre ce quiz.')
+        if quiz.status not in {'DRAFT', 'REVIEW'}:
+            return Response({'detail': 'Seul un brouillon peut être soumis.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not quiz.questions.exists():
+            return Response({'detail': 'Ajoutez au moins une question avant la soumission.'}, status=status.HTTP_400_BAD_REQUEST)
+        quiz.status = 'SUBMITTED'
+        quiz.review_note = ''
+        quiz.save(update_fields=['status', 'review_note', 'updated_at'])
+        return Response(QuizSerializer(quiz, context={'request': request}).data)
+
+    def _attempt_limit_reached(self, quiz, user):
+        """Vérifie si l'apprenant a épuisé ses tentatives autorisées (spec §21)."""
+        if quiz.allow_multiple_attempts is False or quiz.max_attempts:
+            finished = QuizAttempt.objects.filter(quiz=quiz, student=user).exclude(
+                status='IN_PROGRESS'
+            ).count()
+            if quiz.allow_multiple_attempts is False and finished >= 1:
+                return True, 'Ce quiz n’autorise qu’une seule tentative.'
+            if quiz.max_attempts and finished >= quiz.max_attempts:
+                return True, f'Nombre maximal de tentatives atteint ({quiz.max_attempts}).'
+        return False, ''
+
+    def _learner_questions(self, quiz):
+        """Questions présentées à l'apprenant : tirage et mélange (spec §20)."""
+        questions = list(quiz.questions.prefetch_related('choices').order_by('order', 'id'))
+        if quiz.random_question_count and quiz.random_question_count < len(questions):
+            questions = random.sample(questions, quiz.random_question_count)
+        if quiz.shuffle_questions:
+            random.shuffle(questions)
+        return questions
+
+    def _assert_quiz_access(self, quiz, user):
+        """Require an active enrollment for quizzes attached to a course."""
+        if not quiz.course_id or user.is_staff or quiz.course.teacher_id == user.id:
+            return
+        if not Enrollment.objects.filter(
+            course=quiz.course, student=user, status='active'
+        ).exists():
+            raise PermissionDenied('Inscrivez-vous à ce cours pour accéder à ce quiz.')
+
+    def _serialize_learner_questions(self, quiz, questions):
+        """Sérialise les questions sans jamais exposer le corrigé (spec §33 règle 3)."""
+        payload = []
+        for question in questions:
+            data = QuizQuestionLearnerSerializer(question).data
+            if quiz.shuffle_choices and data.get('choices'):
+                data['choices'] = random.sample(list(data['choices']), len(data['choices']))
+            payload.append(data)
+        return payload
+
     @action(detail=True, methods=['post'])
     def start(self, request, pk=None):
-        quiz = self.get_object()
-        attempt = QuizAttempt.objects.create(student=request.user, quiz=quiz, score=0, status='IN_PROGRESS')
-        return Response({'attempt_id': attempt.id, 'started_at': attempt.started_at, 'duration': quiz.duration}, status=status.HTTP_201_CREATED)
+        """Ouvre une tentative et renvoie les questions sans le corrigé.
 
-    @action(detail=False, methods=['post'], url_path='submit/(?P<pk>[^/.]+)', serializer_class=QuizSubmitSerializer)
+        Le chronomètre est autoritaire côté serveur : ``started_at`` est
+        enregistré et ``expires_at`` déduit de la durée du quiz (spec §19).
+        """
+        quiz = self.get_object()
+        self._assert_quiz_access(quiz, request.user)
+        existing_attempt = QuizAttempt.objects.filter(
+            quiz=quiz, student=request.user, status='IN_PROGRESS'
+        ).order_by('-started_at').first()
+        if existing_attempt and existing_attempt.selected_question_ids:
+            selected_ids = existing_attempt.selected_question_ids
+            questions_by_id = {
+                question.id: question
+                for question in quiz.questions.prefetch_related('choices').filter(id__in=selected_ids)
+            }
+            questions = [questions_by_id[question_id] for question_id in selected_ids if question_id in questions_by_id]
+        else:
+            questions = self._learner_questions(quiz)
+        if not questions:
+            return Response(
+                {'detail': 'Ce quiz ne contient aucune question pour le moment.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        blocked, message = self._attempt_limit_reached(quiz, request.user)
+        if blocked:
+            return Response({'detail': message}, status=status.HTTP_400_BAD_REQUEST)
+
+        attempt = existing_attempt
+        created = False
+        if attempt is None:
+            attempt = QuizAttempt.objects.create(
+                student=request.user,
+                quiz=quiz,
+                score=0,
+                raw_score=0,
+                max_score=sum(question.points for question in questions),
+                selected_question_ids=[question.id for question in questions],
+                status='IN_PROGRESS',
+            )
+            created = True
+
+        return Response(
+            {
+                'attempt_id': attempt.id,
+                'quiz_id': quiz.id,
+                'title': quiz.title,
+                'started_at': attempt.started_at,
+                'duration': quiz.duration,
+                'expires_at': attempt.started_at + timedelta(seconds=quiz.duration) if quiz.duration else None,
+                'attempts_allowed': quiz.max_attempts or None,
+                'allow_multiple_attempts': quiz.allow_multiple_attempts,
+                'passing_score': quiz.passing_score,
+                'shuffle_questions': quiz.shuffle_questions,
+                'shuffle_choices': quiz.shuffle_choices,
+                'questions': self._serialize_learner_questions(quiz, questions),
+            },
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=['post'], serializer_class=QuizSubmitSerializer)
     def submit(self, request, pk=None):
-        """Soumettre les réponses à un quiz et calculer le score obtenu[cite: 13, 18]."""
+        """Corrige la tentative et calcule le score côté serveur (spec §17 et §33)."""
         quiz = self.get_object()
         serializer = QuizSubmitSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-
         user_answers = serializer.validated_data['answers']
-        questions = list(quiz.questions.prefetch_related('choices').order_by('order', 'id'))
 
-        if not questions:
-            return Response({'error': 'Ce quiz ne contient aucune question.'}, status=status.HTTP_400_BAD_REQUEST)
-
+        attempt_id = serializer.validated_data.get('attempt_id') or request.data.get('attempt_id')
         attempt = None
-        attempt_id = request.data.get('attempt_id')
         if attempt_id:
+            self._assert_quiz_access(quiz, request.user)
             attempt = get_object_or_404(QuizAttempt, id=attempt_id, quiz=quiz, student=request.user)
             if attempt.status != 'IN_PROGRESS':
-                return Response({'error': 'Cette tentative est déjà terminée.'}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({'detail': 'Cette tentative est déjà terminée.'}, status=status.HTTP_400_BAD_REQUEST)
             if quiz.duration and (timezone.now() - attempt.started_at).total_seconds() > quiz.duration:
                 attempt.status = 'EXPIRED'
                 attempt.submitted_at = timezone.now()
-                attempt.save(update_fields=['status', 'submitted_at'])
-                return Response({'error': 'Le temps du quiz est dépassé.', 'attempt_id': attempt.id}, status=status.HTTP_400_BAD_REQUEST)
+                attempt.duration_seconds = attempt_duration(attempt)
+                attempt.save(update_fields=['status', 'submitted_at', 'duration_seconds'])
+                return Response(
+                    {'detail': 'Le temps du quiz est dépassé.', 'attempt_id': attempt.id},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        else:
+            legacy_submit = any(
+                route in request.path
+                for route in ('/quizzes/submit/', '/quiz-attempts/submit/')
+            )
+            if quiz.duration and not legacy_submit:
+                self._assert_quiz_access(quiz, request.user)
+                return Response(
+                    {'detail': 'Commencez une tentative avant de soumettre ce quiz.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            blocked, message = self._attempt_limit_reached(quiz, request.user)
+            if blocked:
+                return Response({'detail': message}, status=status.HTTP_400_BAD_REQUEST)
 
-        if quiz.shuffle_questions:
-            random.shuffle(questions)
+        if attempt and attempt.selected_question_ids:
+            selected_ids = attempt.selected_question_ids
+            questions_by_id = {
+                question.id: question
+                for question in quiz.questions.prefetch_related('choices').filter(id__in=selected_ids)
+            }
+            questions = [questions_by_id[question_id] for question_id in selected_ids if question_id in questions_by_id]
+        else:
+            questions = list(quiz.questions.prefetch_related('choices').order_by('order', 'id'))
+        if not questions:
+            return Response({'detail': 'Ce quiz ne contient aucune question.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        raw_score = Decimal('0')
-        max_score = sum((question.points for question in questions), 0)
-        correct_count = 0
-        details = []
+        graded = grade_attempt(questions, user_answers)
 
-        for question in questions:
-            submitted = user_answers.get(str(question.id), user_answers.get(question.id))
-            correct_ids = {choice.id for choice in question.choices.all() if choice.is_correct}
-            selected_ids = set(submitted if isinstance(submitted, list) else [submitted]) if submitted is not None else set()
-            is_correct = False
-            answer_text = ''
-            if question.question_type in {'SINGLE_CHOICE', 'TRUE_FALSE', 'MULTIPLE_CHOICE'}:
-                try:
-                    selected_ids = {int(choice_id) for choice_id in selected_ids}
-                except (TypeError, ValueError):
-                    selected_ids = set()
-                is_correct = selected_ids == correct_ids
-            elif question.question_type == 'NUMERIC':
-                answer_text = str(submitted or '')
-                try:
-                    is_correct = Decimal(answer_text) == question.correct_numeric
-                except (InvalidOperation, TypeError, ValueError):
-                    is_correct = False
-            if is_correct:
-                correct_count += 1
-                raw_score += question.points
-
-            details.append({
-                'question_id': question.id,
-                'is_correct': is_correct,
-                'points_awarded': question.points if is_correct else 0,
-                'explanation': question.explanation,
-            })
-
-        score_percentage = round((float(raw_score) / max_score) * 100, 2) if max_score else 0
         with transaction.atomic():
             if attempt is None:
-                attempt = QuizAttempt.objects.create(student=request.user, quiz=quiz, score=score_percentage)
-            attempt.score = score_percentage
-            attempt.raw_score = raw_score
-            attempt.max_score = max_score
-            attempt.correct_answers = correct_count
-            attempt.wrong_answers = len(questions) - correct_count
+                attempt = QuizAttempt.objects.create(
+                    student=request.user,
+                    quiz=quiz,
+                    score=0,
+                    max_score=sum(question.points for question in questions),
+                    selected_question_ids=[question.id for question in questions],
+                    status='IN_PROGRESS',
+                )
+            attempt.score = graded.percentage
+            attempt.raw_score = graded.raw_score
+            attempt.max_score = graded.max_score
+            attempt.correct_answers = graded.correct_answers
+            attempt.wrong_answers = graded.wrong_answers
             attempt.status = 'SUBMITTED'
             attempt.submitted_at = timezone.now()
-            attempt.save(update_fields=['score', 'raw_score', 'max_score', 'correct_answers', 'wrong_answers', 'status', 'submitted_at'])
-            AttemptAnswer.objects.filter(attempt=attempt).delete()
-            AttemptAnswer.objects.bulk_create([
-                AttemptAnswer(
-                    attempt=attempt,
-                    question=question,
-                    selected_choices=list(user_answers.get(str(question.id), user_answers.get(question.id, []))) if isinstance(user_answers.get(str(question.id), user_answers.get(question.id, [])), list) else [user_answers.get(str(question.id), user_answers.get(question.id))],
-                    answer_text=str(user_answers.get(str(question.id), user_answers.get(question.id, ''))),
-                    is_correct=detail['is_correct'],
-                    points_awarded=detail['points_awarded'],
-                )
-                for question, detail in zip(questions, details)
+            attempt.duration_seconds = attempt_duration(attempt)
+            attempt.save(update_fields=[
+                'score', 'raw_score', 'max_score', 'correct_answers', 'wrong_answers',
+                'status', 'submitted_at', 'duration_seconds',
             ])
+            AttemptAnswer.objects.filter(attempt=attempt).delete()
+            AttemptAnswer.objects.bulk_create(build_attempt_answers(attempt, graded))
 
+<<<<<<< Updated upstream:backend/courses/views/course.py
         notify_quiz_result(request.user, quiz, score_percentage)
         certificate = issue_certificate_if_eligible(request.user, quiz.course)
         return Response({
@@ -472,3 +766,55 @@ class QuizViewSet(viewsets.ModelViewSet):
             'xp_earned': quiz.xp_reward if score_percentage >= 70.0 else 0,
             'details': details
         }, status=status.HTTP_201_CREATED)
+=======
+        passed = graded.percentage >= float(quiz.passing_score or 0)
+        return Response(
+            {
+                'attempt_id': attempt.id,
+                'score': graded.percentage,
+                'raw_score': float(graded.raw_score),
+                'max_score': float(graded.max_score),
+                'correct_answers': graded.correct_answers,
+                'wrong_answers': graded.wrong_answers,
+                'passed': passed,
+                'xp_earned': quiz.xp_reward if passed else 0,
+                'details': graded.details,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=True, methods=['get', 'post'], url_path='questions', serializer_class=QuizQuestionWriteSerializer)
+    def add_question(self, request, pk=None):
+        """Liste (GET) ou ajoute (POST) une question dans ce quiz (spec §28)."""
+        quiz = self.get_object()
+
+        if request.method == 'GET':
+            can_edit = user_can_edit_quiz(request.user, quiz)
+            serializer_class = QuizQuestionStaffSerializer if can_edit else QuizQuestionLearnerSerializer
+            return Response(serializer_class(quiz.questions.prefetch_related('choices'), many=True).data)
+
+        if not user_can_edit_quiz(request.user, quiz):
+            raise PermissionDenied('Vous ne pouvez pas modifier ce quiz.')
+        serializer = QuizQuestionWriteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        question = serializer.save(
+            quiz=quiz,
+            created_by=request.user,
+            order=serializer.validated_data.get('order') or quiz.questions.count() + 1,
+        )
+        return Response(QuizQuestionStaffSerializer(question).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAdminUser])
+    def publish(self, request, pk=None):
+        """Publication d'un quiz par l'administration (spec §26 et §27)."""
+        quiz = self.get_object()
+        if not quiz.questions.exists():
+            return Response(
+                {'detail': 'Impossible de publier un quiz sans question.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        quiz.status = 'PUBLISHED'
+        quiz.review_note = ''
+        quiz.save(update_fields=['status', 'review_note', 'updated_at'])
+        return Response(QuizSerializer(quiz, context={'request': request}).data)
+>>>>>>> Stashed changes:courses/views/course.py

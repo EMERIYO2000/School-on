@@ -1,0 +1,3 @@
+⚠️ Firebase non initialisé en local (fichier credentials manquant).
+⚠️ Attention: Fichier firebase_credentials.json introuvable. Les notifications ne fonctionneront pas.
+System check identified no issues (0 silenced).

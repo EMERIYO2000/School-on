@@ -1,9 +1,20 @@
-# courses/serializers.py
+# courses/serializers/course_serializer.py
 from rest_framework import serializers
 from ..models import (
     Category, StateExam, ExamQuestion, ExamChoice, ArchiveResource, Course, Chapter, ContentBlock, LearnerQuestion, Lesson,
     Quiz, Question, Choice, Enrollment, 
     LessonProgress, QuizAttempt, AttemptAnswer, CourseReview
+)
+from .quiz_serializer import (
+    QuizSerializer,
+    QuizQuestionLearnerSerializer,
+    QuizQuestionStaffSerializer,
+    QuizQuestionWriteSerializer,
+    QuizChoiceLearnerSerializer,
+    QuizChoiceStaffSerializer,
+    QuizAttemptSerializer,
+    QuizAttemptDetailSerializer,
+    AttemptAnswerSerializer,
 )
 
 
@@ -53,12 +64,11 @@ class ArchiveResourceSerializer(serializers.ModelSerializer):
         return request.build_absolute_uri(obj.file.url) if request and obj.file else (obj.file.url if obj.file else None)
 
 
-class ChoiceSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Choice
-        fields = ['id', 'text']
+class ChoiceSerializer(QuizChoiceStaffSerializer):
+    """Alias historique : un choix de réponse vu par le créateur (corrigé inclus)."""
 
 
+<<<<<<< Updated upstream:backend/courses/serializers/course_serializer.py
 class QuestionSerializer(serializers.ModelSerializer):
     choices = ChoiceSerializer(many=True, read_only=True)
 
@@ -77,72 +87,78 @@ class QuizSerializer(serializers.ModelSerializer):
             'year', 'session', 'series', 'duration', 'shuffle_questions',
             'shuffle_choices', 'is_final_assessment', 'status', 'xp_reward', 'questions',
         ]
+=======
+class QuestionSerializer(QuizQuestionStaffSerializer):
+    """Alias historique : question complète pour le créateur / l'admin."""
+>>>>>>> Stashed changes:courses/serializers/course_serializer.py
 
 
 class QuizChoiceCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Choice
-        fields = ['text', 'is_correct']
+        fields = ['text', 'is_correct', 'order']
 
 
-class QuizQuestionCreateSerializer(serializers.ModelSerializer):
-    choices = QuizChoiceCreateSerializer(many=True, required=False, default=list)
-
-    class Meta:
-        model = Question
-        fields = ['text', 'question_type', 'points', 'order', 'correct_numeric', 'explanation', 'choices']
+class QuizQuestionCreateSerializer(QuizQuestionWriteSerializer):
+    """Création d'une question complète au moment de la création du quiz."""
 
     def validate_choices(self, choices):
         if not choices:
             raise serializers.ValidationError('Une question doit avoir au moins une réponse.')
         return choices
 
-    def validate(self, attrs):
-        question_type = attrs.get('question_type', 'SINGLE_CHOICE')
-        choices = attrs.get('choices', [])
-        correct_count = sum(choice['is_correct'] for choice in choices)
-        if question_type in {'SINGLE_CHOICE', 'TRUE_FALSE'} and correct_count != 1:
-            raise serializers.ValidationError('Cette question doit avoir exactement une bonne réponse.')
-        if question_type in {'SINGLE_CHOICE', 'TRUE_FALSE', 'MULTIPLE_CHOICE'} and len(choices) < 2:
-            raise serializers.ValidationError('Cette question doit avoir au moins deux choix.')
-        if question_type == 'MULTIPLE_CHOICE' and correct_count < 1:
-            raise serializers.ValidationError('Un choix multiple doit avoir au moins une bonne réponse.')
-        if question_type == 'NUMERIC' and attrs.get('correct_numeric') is None:
-            raise serializers.ValidationError({'correct_numeric': 'La réponse numérique est obligatoire.'})
-        if question_type == 'TRUE_FALSE' and len(choices) != 2:
-            raise serializers.ValidationError('Une question Vrai/Faux doit avoir deux réponses.')
-        return attrs
-
 
 class QuizCreateSerializer(serializers.ModelSerializer):
-    questions = QuizQuestionCreateSerializer(many=True, min_length=1)
+    """Création d'un quiz complet (métadonnées + questions) — spec §13.
+
+    Le champ ``course`` est optionnel : le Quiz Game, le Quiz Training et la
+    préparation aux examens d'État sont autonomes (spec §14 / §15).
+    """
+    questions = QuizQuestionCreateSerializer(many=True, min_length=1, required=False)
 
     class Meta:
         model = Quiz
         fields = [
+<<<<<<< Updated upstream:backend/courses/serializers/course_serializer.py
             'id', 'course', 'chapter', 'title', 'description', 'quiz_type',
             'subject', 'school_level', 'year', 'session', 'series', 'duration',
             'shuffle_questions', 'shuffle_choices', 'is_final_assessment', 'xp_reward', 'questions',
+=======
+            'id', 'course', 'chapter', 'category', 'title', 'description',
+            'quiz_type', 'subject', 'level', 'school_level', 'year', 'session',
+            'series', 'duration', 'shuffle_questions', 'shuffle_choices',
+            'random_question_count', 'allow_multiple_attempts', 'max_attempts',
+            'passing_score', 'xp_reward', 'questions',
+>>>>>>> Stashed changes:courses/serializers/course_serializer.py
         ]
         read_only_fields = ['id']
 
     def validate(self, attrs):
         chapter = attrs.get('chapter')
-        course = attrs['course']
-        if chapter and chapter.course_id != course.id:
+        course = attrs.get('course')
+        if chapter and course and chapter.course_id != course.id:
             raise serializers.ValidationError({'chapter': 'Ce chapitre n’appartient pas au cours indiqué.'})
+        if chapter and not course:
+            attrs['course'] = chapter.course
+        if not attrs.get('questions') and not attrs.get('course'):
+            raise serializers.ValidationError(
+                {'questions': 'Un quiz autonome (Game / Training / Examen) doit contenir au moins une question.'}
+            )
         return attrs
 
     def create(self, validated_data):
-        questions_data = validated_data.pop('questions')
-        quiz = Quiz.objects.create(**validated_data)
+        questions_data = validated_data.pop('questions', [])
+        request = self.context['request']
+        quiz = Quiz.objects.create(created_by=request.user, **validated_data)
         for question_data in questions_data:
-            choices_data = question_data.pop('choices')
-            question = Question.objects.create(quiz=quiz, created_by=self.context['request'].user, **question_data)
-            Choice.objects.bulk_create(
-                [Choice(question=question, **choice_data) for choice_data in choices_data]
-            )
+            choices_data = question_data.pop('choices', [])
+            question = Question.objects.create(quiz=quiz, created_by=request.user, **question_data)
+            Choice.objects.bulk_create([
+                Choice(question=question, **{'order': choice.get('order') or index, **choice})
+                for index, choice in enumerate(choices_data, start=1)
+            ])
         return quiz
+
 
 
 class LessonSerializer(serializers.ModelSerializer):
@@ -166,33 +182,143 @@ class LessonSerializer(serializers.ModelSerializer):
 
 
 class ChapterSerializer(serializers.ModelSerializer):
+    """Chapitre d'un cours — lecture pour l'apprenant, écriture pour le créateur.
+
+    Le champ ``course`` n'est visible que pour le créateur / l'admin : côté
+    apprenant il n'est pas utile de découvrir l'identifiant interne du cours.
+    """
     lessons = LessonSerializer(many=True, read_only=True)
     content_blocks = serializers.SerializerMethodField()
+    quizzes = serializers.SerializerMethodField()
+    content_blocks_count = serializers.SerializerMethodField()
+    course_title = serializers.ReadOnlyField(source='course.title')
 
     class Meta:
         model = Chapter
-        fields = ['id', 'title', 'summary', 'description', 'order', 'lessons', 'content_blocks']
+        fields = [
+            'id', 'course', 'course_title', 'title', 'summary', 'description', 'order',
+            'lessons', 'content_blocks', 'quizzes', 'content_blocks_count',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
 
     def get_content_blocks(self, obj):
         return ContentBlockSerializer(obj.content_blocks.all(), many=True, context=self.context).data
 
+    def get_quizzes(self, obj):
+        return [
+            {
+                'id': quiz.id,
+                'title': quiz.title,
+                'quiz_type': quiz.quiz_type,
+                'status': quiz.status,
+                'questions_count': quiz.questions_count,
+                'duration': quiz.duration,
+            }
+            for quiz in obj.quizzes.all()
+        ]
+
+    def get_content_blocks_count(self, obj):
+        return obj.content_blocks.count()
+
 
 class ContentBlockSerializer(serializers.ModelSerializer):
+    """Bloc de contenu dynamique d'un chapitre (spec §6)."""
+    chapter_title = serializers.ReadOnlyField(source='chapter.title')
+    file_url = serializers.SerializerMethodField()
+
     class Meta:
         model = ContentBlock
-        fields = ['id', 'chapter', 'content_type', 'title', 'text_content', 'file', 'url', 'language', 'caption', 'order', 'created_at', 'updated_at']
+        fields = [
+            'id', 'chapter', 'chapter_title', 'content_type', 'title', 'text_content',
+            'file', 'file_url', 'url', 'language', 'caption', 'order',
+            'created_at', 'updated_at',
+        ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_file_url(self, obj):
+        if not obj.file:
+            return None
+        request = self.context.get('request')
+        return request.build_absolute_uri(obj.file.url) if request else obj.file.url
+
+    def validate(self, attrs):
+        """Valide les champs obligatoires selon le type de bloc (spec §6.1)."""
+        instance = getattr(self, 'instance', None)
+        content_type = attrs.get('content_type', getattr(instance, 'content_type', 'TEXT'))
+        required = {
+            'TEXT': ['text_content'],
+            'IMAGE': ['file'],
+            'VIDEO': [],
+            'DOCUMENT': ['file'],
+            'CODE': ['text_content'],
+            'RESOURCE': ['url'],
+        }[content_type]
+        if content_type == 'VIDEO':
+            file_value = attrs.get('file', getattr(instance, 'file', None))
+            url_value = attrs.get('url', getattr(instance, 'url', None))
+            if not file_value and not url_value:
+                raise serializers.ValidationError(
+                    {'file': 'Un fichier ou une URL vidéo est obligatoire.'}
+                )
+        for field in required:
+            value = attrs.get(field, getattr(instance, field, None))
+            if not value:
+                other = 'url' if field == 'file' and attrs.get('url') else None
+                if other:
+                    continue
+                raise serializers.ValidationError(
+                    {field: f'Ce champ est obligatoire pour un contenu de type {content_type}.'}
+                )
+        return attrs
 
 
 class LearnerQuestionSerializer(serializers.ModelSerializer):
+    """Question d'un apprenant sur un chapitre (spec §8)."""
+    learner_name = serializers.SerializerMethodField()
+    chapter_title = serializers.ReadOnlyField(source='chapter.title')
+    course_title = serializers.ReadOnlyField(source='course.title')
+    answered_by_name = serializers.SerializerMethodField()
+
     class Meta:
         model = LearnerQuestion
-        fields = ['id', 'learner', 'course', 'chapter', 'content_block', 'question', 'answer', 'status', 'created_at', 'answered_at']
-        read_only_fields = ['id', 'learner', 'course', 'status', 'answer', 'created_at', 'answered_at']
+        fields = [
+            'id', 'learner', 'learner_name', 'course', 'course_title', 'chapter',
+            'chapter_title', 'content_block', 'question', 'answer', 'status',
+            'answered_by', 'answered_by_name', 'created_at', 'answered_at',
+        ]
+        read_only_fields = [
+            'id', 'learner', 'learner_name', 'status', 'answer', 'answered_by',
+            'answered_by_name', 'created_at', 'answered_at',
+        ]
+
+    def get_learner_name(self, obj):
+        user = obj.learner
+        return user.get_full_name() or user.username
+
+    def get_answered_by_name(self, obj):
+        if not obj.answered_by:
+            return None
+        return obj.answered_by.get_full_name() or obj.answered_by.username
+
+    def validate(self, attrs):
+        course = attrs.get('course')
+        chapter = attrs.get('chapter')
+        content_block = attrs.get('content_block')
+        if chapter and course and chapter.course_id != course.id:
+            raise serializers.ValidationError({'chapter': 'Ce chapitre n’appartient pas au cours indiqué.'})
+        if content_block and chapter and content_block.chapter_id != chapter.id:
+            raise serializers.ValidationError(
+                {'content_block': 'Ce contenu n’appartient pas au chapitre indiqué.'}
+            )
+        if attrs.get('question') is not None and len(str(attrs['question']).strip()) < 5:
+            raise serializers.ValidationError({'question': 'La question doit contenir au moins 5 caractères.'})
+        return attrs
 
 
 class LearnerQuestionAnswerSerializer(serializers.Serializer):
-    answer = serializers.CharField()
+    answer = serializers.CharField(min_length=2)
+
 
 
 class CourseListSerializer(serializers.ModelSerializer):
@@ -266,56 +392,83 @@ class CourseReviewSerializer(serializers.ModelSerializer):
 
 
 class QuizSubmitSerializer(serializers.Serializer):
-    """Permet de soumettre les réponses d'un quiz et de calculer le score."""
+    """Soumission des réponses d'un quiz.
+
+    Formats acceptés (rétrocompatibles) :
+        {"answers": {"1": 4, "2": [7, 9], "3": "60", "4": "texte libre"}}
+        {"answers": [{"question_id": 1, "choice_id": 4}]}
+        {"answers": [{"question_id": 4, "answer_text": "texte libre"}]}
+
+    La sortie normalisée est toujours de la forme :
+        {"<question_id>": {"choices": [ids], "text": "..."}}
+
+    Le score n'est jamais accepté depuis le client (spec §33 règle 2).
+    """
     answers = serializers.JSONField(
-        help_text="Format accepté: {'1': 4} ou [{'question_id': 1, 'choice_id': 4}]"
+        help_text="Réponses par identifiant de question (choix, liste de choix ou texte)."
     )
+    attempt_id = serializers.IntegerField(required=False, allow_null=True)
+
+    def _normalize_choice(self, value):
+        if isinstance(value, list):
+            try:
+                return [int(item) for item in value]
+            except (TypeError, ValueError):
+                raise serializers.ValidationError('Les identifiants de choix doivent être numériques.')
+        if isinstance(value, dict):
+            return None
+        try:
+            return [int(value)]
+        except (TypeError, ValueError):
+            return []
 
     def validate_answers(self, value):
+        normalized = {}
+
         if isinstance(value, dict):
-            normalized = {}
-            for question_id, choice_id in value.items():
-                if isinstance(choice_id, list):
-                    try:
-                        normalized[str(question_id)] = [int(item) for item in choice_id]
-                    except (TypeError, ValueError):
-                        raise serializers.ValidationError('Les identifiants de choix doivent être numériques.')
+            for question_id, raw in value.items():
+                if isinstance(raw, dict):
+                    normalized[str(question_id)] = {
+                        'choices': self._normalize_choice(
+                            raw.get('choice_ids', raw.get('choice_id', raw.get('choices', [])))
+                        ) or [],
+                        'text': str(raw.get('answer_text', raw.get('text', '')) or ''),
+                    }
+                elif isinstance(raw, list):
+                    normalized[str(question_id)] = {
+                        'choices': self._normalize_choice(raw) or [], 'text': ''
+                    }
                 else:
-                    try:
-                        normalized[str(question_id)] = int(choice_id)
-                    except (TypeError, ValueError):
-                        normalized[str(question_id)] = str(choice_id)
+                    # Scalaire ambigu : un identifiant de choix (« 4 ») OU une
+                    # valeur brute (« 60 » pour une question NUMERIC, du texte
+                    # pour une réponse libre). On transmet les deux représentations
+                    # et la correction choisit selon le type de la question.
+                    choices = self._normalize_choice(raw)
+                    normalized[str(question_id)] = {
+                        'choices': choices or [],
+                        'text': str(raw),
+                    }
             return normalized
 
         if isinstance(value, list):
-            normalized = {}
             for item in value:
                 if not isinstance(item, dict):
-                    raise serializers.ValidationError('Chaque réponse doit être un objet avec question_id et choice_id.')
-
+                    raise serializers.ValidationError(
+                        'Chaque réponse doit être un objet avec question_id et choice_id.'
+                    )
                 question_id = item.get('question_id')
-                choice_id = item.get('choice_id', item.get('choice_ids'))
-                if question_id is None or choice_id is None:
-                    raise serializers.ValidationError('Chaque réponse doit contenir question_id et choice_id.')
-
-                if isinstance(choice_id, list):
-                    normalized[str(question_id)] = [int(item) for item in choice_id]
-                else:
-                    try:
-                        normalized[str(question_id)] = int(choice_id)
-                    except (TypeError, ValueError):
-                        normalized[str(question_id)] = str(choice_id)
+                if question_id is None:
+                    raise serializers.ValidationError('Chaque réponse doit contenir question_id.')
+                choice_id = item.get('choice_id', item.get('choice_ids', item.get('choices')))
+                answer_text = str(item.get('answer_text', item.get('text', '')) or '')
+                if choice_id is None and not answer_text:
+                    raise serializers.ValidationError(
+                        'Chaque réponse doit contenir choice_id ou answer_text.'
+                    )
+                normalized[str(question_id)] = {
+                    'choices': self._normalize_choice(choice_id) or [] if choice_id is not None else [],
+                    'text': answer_text,
+                }
             return normalized
 
         raise serializers.ValidationError('Le champ answers doit être un dictionnaire ou une liste d’objets.')
-
-
-class QuizAttemptSerializer(serializers.ModelSerializer):
-    quiz_title = serializers.ReadOnlyField(source='quiz.title')
-
-    class Meta:
-        model = QuizAttempt
-        fields = ['id', 'quiz', 'quiz_title', 'score', 'raw_score', 'max_score', 'percentage', 'correct_answers', 'wrong_answers', 'status', 'started_at', 'submitted_at', 'completed_at']
-        read_only_fields = fields
-
-    percentage = serializers.FloatField(source='score', read_only=True)

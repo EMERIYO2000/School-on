@@ -1,0 +1,51 @@
+⚠️ Firebase non initialisé en local (fichier credentials manquant).
+⚠️ Attention: Fichier firebase_credentials.json introuvable. Les notifications ne fonctionneront pas.
+Migrations for 'courses':
+  courses\migrations\0007_alter_attemptanswer_options_alter_chapter_options_and_more.py
+    ~ Change Meta options on attemptanswer
+    ~ Change Meta options on chapter
+    ~ Change Meta options on choice
+    ~ Change Meta options on learnerquestion
+    ~ Change Meta options on question
+    ~ Change Meta options on quiz
+    + Add field created_at to chapter
+    + Add field updated_at to chapter
+    + Add field order to choice
+    + Add field answered_by to learnerquestion
+    + Add field created_at to question
+    + Add field updated_at to question
+    + Add field allow_multiple_attempts to quiz
+    + Add field category to quiz
+    + Add field created_at to quiz
+    + Add field created_by to quiz
+    + Add field level to quiz
+    + Add field max_attempts to quiz
+    + Add field passing_score to quiz
+    + Add field random_question_count to quiz
+    + Add field review_note to quiz
+    + Add field updated_at to quiz
+    + Add field duration_seconds to quizattempt
+    ~ Alter field course on quiz
+    ~ Alter field status on quizattempt
+Migrations for 'utilisateurs':
+  utilisateurs\migrations\0003_alter_tutorprofile_options_tutorprofile_education_and_more.py
+    ~ Change Meta options on tutorprofile
+    + Add field education to tutorprofile
+    + Add field experience to tutorprofile
+    + Add field headline to tutorprofile
+    + Add field id_document to tutorprofile
+    + Add field mentor_status to tutorprofile
+    + Add field public_location to tutorprofile
+    + Add field session_price to tutorprofile
+    + Add field specialties to tutorprofile
+    + Add field title to tutorprofile
+    + Add field verified_at to tutorprofile
+    + Add field years_of_experience to tutorprofile
+    + Create model LearnerProfile
+    + Create model MentorApplication
+    + Create model MentorAssessment
+    + Create model MentorInterview
+    + Create model MentorSkill
+    + Create model Qualification
+    + Create model VerificationRecord
+    + Create model MentorReport

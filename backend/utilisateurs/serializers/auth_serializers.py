@@ -72,6 +72,9 @@ class LogoutSerializer(serializers.Serializer):
     refresh = serializers.CharField(required=True)
 
 class MeSerializer(serializers.ModelSerializer):
+    full_name = serializers.SerializerMethodField()
+    mentor_status = serializers.SerializerMethodField()
+
     class Meta:
         model = CustomUser
         fields = (
@@ -86,8 +89,20 @@ class MeSerializer(serializers.ModelSerializer):
             "is_premium_subscriber",
             "first_name",
             "last_name",
+            "full_name",
+            "user_type",
+            "mentor_status",
         )
         read_only_fields = fields
+
+    def get_full_name(self, obj):
+        return obj.get_full_name() or obj.username
+
+    def get_mentor_status(self, obj):
+        """Statut du parcours de vérification mentor (spec User & Mentor Journey §26)."""
+        if not hasattr(obj, 'tutor_profile'):
+            return 'DRAFT'
+        return obj.tutor_profile.mentor_status
 
 class ChangePasswordSerializer(serializers.Serializer):
     older_password = serializers.CharField(min_length=8, required=True)

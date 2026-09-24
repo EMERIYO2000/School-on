@@ -1,7 +1,7 @@
 from django.contrib.auth import get_user_model
 from django.db.models import Q
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
-from rest_framework import status, viewsets
+from rest_framework import status, viewsets, permissions
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -9,15 +9,42 @@ from rest_framework_simplejwt.tokens import BlacklistedToken, OutstandingToken
 
 from ..models import ParentChildRelation, ParentProfile, TutorProfile
 from ..serializers.feature_serializers import FCMTokenSerializer, LocationUpdateSerializer, NearbyTutorSerializer, ParentChildRequestSerializer, ParentChildResponseSerializer, TutorDocumentUploadSerializer
+from ..serializers.profile_serializers import UserDetailSerializer
 from ..utils.fcm_utils import send_fcm_notification
 from ..utils.geo_utils import haversine_distance
 
 User = get_user_model()
 
 
-class UserFeaturesViewSet(viewsets.GenericViewSet):
+class UserFeaturesViewSet(viewsets.GenericViewSet, viewsets.mixins.ListModelMixin):
     permission_classes = [IsAuthenticated]
     serializer_class = LocationUpdateSerializer
+
+    def get_permissions(self):
+        if self.action == 'list':
+            return [permissions.IsAdminUser()]
+        return [self.permission_classes[0]()]
+
+    def get_queryset(self):
+        return User.objects.all().order_by('-date_joined')
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return UserDetailSerializer
+        return super().get_serializer_class()
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        search = request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(email__icontains=search)
+                | Q(username__icontains=search)
+                | Q(first_name__icontains=search)
+                | Q(last_name__icontains=search)
+            )
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
 
     @extend_schema(request=LocationUpdateSerializer, responses={200: OpenApiResponse(description='Position mise a jour.')})
     @action(detail=False, methods=['patch'], url_path='me/location')
@@ -122,12 +149,27 @@ class UserFeaturesViewSet(viewsets.GenericViewSet):
             return Response({'error': 'Les parametres lat, lng et radius doivent etre numeriques.'}, status=status.HTTP_400_BAD_REQUEST)
         if not -90 <= latitude <= 90 or not -180 <= longitude <= 180 or radius < 0:
             return Response({'error': 'Les coordonnees ou le rayon sont invalides.'}, status=status.HTTP_400_BAD_REQUEST)
-        tutors = TutorProfile.objects.select_related('user').filter(user__is_teacher=True, user__is_active=True, user__latitude__isnull=False, user__longitude__isnull=False).exclude(user=request.user)
-        nearby_tutors = []
+
+        # Par défaut seuls les mentors verifies sont publiquement listables (spec §27).
+        verified_only = str(request.query_params.get('verified_only', 'true')).lower() != 'false'
+        tutors = TutorProfile.objects.select_related('user').filter(
+            user__is_active=True,
+            user__latitude__isnull=False,
+            user__longitude__isnull=False,
+        ).exclude(user=request.user)
+        if verified_only:
+            tutors = tutors.filter(mentor_status='VERIFIED', is_verified=True)
+
+        with_location = []
         for tutor in tutors:
-            distance = haversine_distance(latitude, longitude, float(tutor.user.latitude), float(tutor.user.longitude))
+            if not tutor.user.is_teacher:
+                continue
+            distance = haversine_distance(
+                latitude, longitude, float(tutor.user.latitude), float(tutor.user.longitude)
+            )
             if distance <= radius:
-                tutor.distance_km = distance
-                nearby_tutors.append(tutor)
-        nearby_tutors.sort(key=lambda tutor: tutor.distance_km)
-        return Response(NearbyTutorSerializer(nearby_tutors, many=True).data)
+                tutor.distance_km = round(distance, 2)
+                with_location.append(tutor)
+
+        with_location.sort(key=lambda tutor: tutor.distance_km)
+        return Response(NearbyTutorSerializer(with_location, many=True).data)

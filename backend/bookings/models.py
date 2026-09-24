@@ -28,4 +28,18 @@ class Booking(models.Model):
     
     def __str__(self):
         return f"Réservation de {self.student.username} chez {self.tutor.user.username}"
+
+
+class BookingReview(models.Model):
+    """Avis d'un apprenant après une session réellement terminée."""
+    booking = models.OneToOneField(Booking, on_delete=models.CASCADE, related_name='review')
+    rating = models.PositiveSmallIntegerField()
+    comment = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Avis #{self.pk} pour la réservation #{self.booking_id}"
     

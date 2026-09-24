@@ -5,8 +5,9 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from ..models import ParentChildRelation, ParentProfile, TutorProfile
+from ..models import LearnerProfile, MentorApplication, ParentChildRelation, ParentProfile, TutorProfile
 from ..serializers.feature_serializers import LocationUpdateSerializer, ParentChildRequestSerializer
+from ..serializers.mentor_serializers import LearnerProfileSerializer, MentorApplicationSerializer
 from ..serializers.profile_serializers import AvatarSerializer, ParentProfileSerializer, TutorProfileSerializer, UpdateTutorProfileSerializer, UserDetailSerializer
 
 User = get_user_model()
@@ -33,8 +34,25 @@ class ProfileViewSet(viewsets.GenericViewSet):
         data = {'user': UserDetailSerializer(user).data}
         if user.is_teacher and hasattr(user, 'tutor_profile'):
             data['tutor_profile'] = TutorProfileSerializer(user.tutor_profile).data
+        elif hasattr(user, 'tutor_profile'):
+            # Un compte n'est pas encore mentor, mais le profil existe déjà
+            # (brouillon de candidature) : on l'expose pour l'écran de vérification.
+            data['tutor_profile'] = TutorProfileSerializer(user.tutor_profile).data
         if user.is_parent and hasattr(user, 'parent_profile'):
             data['parent_profile'] = ParentProfileSerializer(user.parent_profile).data
+
+        learner_profile, _ = LearnerProfile.objects.get_or_create(user=user)
+        data['learner_profile'] = LearnerProfileSerializer(learner_profile).data
+
+        application = (
+            MentorApplication.objects.filter(user=user)
+            .order_by('-created_at')
+            .first()
+        )
+        if application:
+            data['mentor_application'] = MentorApplicationSerializer(
+                application, context={'request': request}
+            ).data
         return Response(data)
 
     @extend_schema(summary='Mettre a jour la photo de profil', request=AvatarSerializer, responses={200: OpenApiResponse(description='Avatar mis a jour.')})
@@ -45,11 +63,23 @@ class ProfileViewSet(viewsets.GenericViewSet):
         serializer.save()
         return Response({'message': 'Avatar mis a jour.', 'avatar': request.user.avatar.url if request.user.avatar else None})
 
+    @extend_schema(summary='Consulter ou completer le profil apprenant', request=LearnerProfileSerializer, responses={200: LearnerProfileSerializer})
+    @action(detail=False, methods=['get', 'patch', 'put'], url_path='learner')
+    def learner_profile(self, request):
+        """Profil apprenant et progression du profil (spec §12 et §13)."""
+        profile, _ = LearnerProfile.objects.get_or_create(user=request.user)
+        if request.method == 'GET':
+            return Response(LearnerProfileSerializer(profile).data)
+        serializer = LearnerProfileSerializer(profile, data=request.data, partial=request.method == 'PATCH')
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(LearnerProfileSerializer(profile).data)
+
     @extend_schema(summary='Mettre a jour le profil tuteur', request=UpdateTutorProfileSerializer, responses={200: TutorProfileSerializer})
     @action(detail=False, methods=['patch', 'put'], url_path='tutor')
     def update_tutor_profile(self, request):
-        if not request.user.is_teacher:
-            return Response({'error': 'Reserve aux comptes enseignants.'}, status=status.HTTP_403_FORBIDDEN)
+        # Un utilisateur n'a pas encore besoin d'être "enseignant" pour préparer
+        # son profil : le statut mentor s'obtient après vérification (spec §15).
         tutor_profile, _ = TutorProfile.objects.get_or_create(user=request.user)
         serializer = UpdateTutorProfileSerializer(tutor_profile, data=request.data, partial=request.method == 'PATCH')
         serializer.is_valid(raise_exception=True)

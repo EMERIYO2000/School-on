@@ -246,3 +246,35 @@ class CoursesApiTests(APITestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data['score'], 100.0)
         self.assertEqual(quiz.attempts.get().raw_score, 2)
+
+    def test_randomized_quiz_persists_questions_for_submission(self):
+        quiz = Quiz.objects.create(
+            title='Quiz aléatoire',
+            quiz_type='TRAINING',
+            random_question_count=2,
+            shuffle_questions=True,
+            status='PUBLISHED',
+        )
+        for index in range(3):
+            question = Question.objects.create(
+                quiz=quiz,
+                text=f'Question {index}',
+                points=index + 1,
+            )
+            Choice.objects.create(question=question, text='Réponse', is_correct=True)
+
+        self.authenticate(self.student)
+        started = self.client.post(f'/api/courses/quizzes/{quiz.id}/start/')
+        self.assertEqual(started.status_code, 201)
+        attempt = quiz.attempts.get()
+        self.assertEqual(len(attempt.selected_question_ids), 2)
+        self.assertEqual(len(started.data['questions']), 2)
+
+        submitted = self.client.post(
+            f'/api/courses/quizzes/{quiz.id}/submit/',
+            {'attempt_id': attempt.id, 'answers': {}},
+            format='json',
+        )
+        self.assertEqual(submitted.status_code, 201)
+        self.assertEqual(attempt.answers.count(), 2)
+        self.assertEqual(float(attempt.max_score), submitted.data['max_score'])

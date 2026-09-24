@@ -46,6 +46,9 @@ class NearbyTutorSerializer(serializers.ModelSerializer):
     latitude = serializers.DecimalField(source='user.latitude', max_digits=9, decimal_places=6, read_only=True)
     longitude = serializers.DecimalField(source='user.longitude', max_digits=9, decimal_places=6, read_only=True)
     distance_km = serializers.FloatField(read_only=True)
+    hourly_rate = serializers.FloatField(read_only=True)
+    session_price = serializers.FloatField(read_only=True)
+    mentor_status = serializers.ReadOnlyField()
 
     class Meta:
         model = TutorProfile
@@ -53,13 +56,20 @@ class NearbyTutorSerializer(serializers.ModelSerializer):
             'id', 
             'full_name', 
             'avatar', 
+            'title',
+            'headline',
             'bio', 
+            'specialties',
+            'experience',
             'hourly_rate', 
+            'session_price',
             'city', 
+            'public_location',
             'latitude', 
             'longitude', 
             'distance_km',
-            'is_verified'
+            'is_verified',
+            'mentor_status',
         ]
 
 
