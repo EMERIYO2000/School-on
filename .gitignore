@@ -1,0 +1,8 @@
+__pycache__/
+db.sqlite3
+.env
+*.env
+firebase_credentials.json
+media/
+staticfiles/
+payments.py

@@ -1,7 +1,7 @@
 from django.contrib.auth import get_user_model
 from rest_framework.test import APITestCase
 
-from .models import CommunityCategory, CommunityReport, ForumPost, ForumThread
+from .models import CommunityCategory, CommunityLike, CommunityReport, ForumPost, ForumThread
 
 
 class CommunityApiTests(APITestCase):
@@ -41,5 +41,27 @@ class CommunityApiTests(APITestCase):
 		self.client.force_authenticate(user=self.helper)
 		response = self.client.post(f'/api/community/threads/{thread.id}/replies/', {'content': 'Réponse impossible sur un thread verrouillé.'}, format='json')
 		self.assertEqual(response.status_code, 400)
+
+	def test_authenticated_user_can_toggle_thread_and_reply_likes(self):
+		thread = ForumThread.objects.create(
+			author=self.author,
+			category=self.category,
+			title='Publication à aimer',
+			content='Une publication éducative assez longue pour le test.',
+			status='PUBLISHED',
+		)
+		post = ForumPost.objects.create(thread=thread, author=self.helper, content='Une réponse utile.')
+		self.client.force_authenticate(user=self.author)
+
+		thread_like = self.client.post(f'/api/community/threads/{thread.id}/like/')
+		self.assertEqual(thread_like.status_code, 200)
+		self.assertEqual(thread_like.data, {'liked': True, 'likes_count': 1})
+		self.assertTrue(CommunityLike.objects.filter(user=self.author, thread=thread).exists())
+
+		thread_unlike = self.client.post(f'/api/community/threads/{thread.id}/like/')
+		self.assertEqual(thread_unlike.data, {'liked': False, 'likes_count': 0})
+
+		post_like = self.client.post(f'/api/community/posts/{post.id}/like/')
+		self.assertEqual(post_like.data, {'liked': True, 'likes_count': 1})
 
 # Create your tests here.

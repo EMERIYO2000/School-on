@@ -1,11 +1,13 @@
 import re
 
 from django.contrib.auth import get_user_model
+from django.db.models import Count, Q
 from rest_framework import serializers
 
 from courses.models import Course, Lesson, Question, Quiz
 
 from .models import (
+    CommunityLike,
     CommunityCategory,
     CommunityReport,
     ForumPost,
@@ -58,22 +60,30 @@ class CommunityCategorySerializer(serializers.ModelSerializer):
 class ForumPostSerializer(serializers.ModelSerializer):
     author = CommunityAuthorSerializer(read_only=True)
     accepted = serializers.BooleanField(source='is_accepted_solution', read_only=True)
+    likes_count = serializers.IntegerField(read_only=True)
+    liked_by_user = serializers.SerializerMethodField()
 
     class Meta:
         model = ForumPost
-        fields = ['id', 'thread', 'author', 'parent_post', 'content', 'status', 'accepted', 'created_at', 'updated_at']
+        fields = ['id', 'thread', 'author', 'parent_post', 'content', 'status', 'accepted', 'likes_count', 'liked_by_user', 'created_at', 'updated_at']
         read_only_fields = ['id', 'thread', 'author', 'status', 'accepted', 'created_at', 'updated_at']
 
     def validate_content(self, value):
         return validate_educational_text(value)
+
+    def get_liked_by_user(self, obj):
+        request = self.context.get('request')
+        return bool(request and request.user.is_authenticated and CommunityLike.objects.filter(user=request.user, post=obj).exists())
 
 
 class ForumThreadSerializer(serializers.ModelSerializer):
     author = CommunityAuthorSerializer(read_only=True)
     category = serializers.SlugRelatedField(slug_field='slug', queryset=CommunityCategory.objects.filter(is_active=True), required=True)
     category_detail = CommunityCategorySerializer(source='category', read_only=True)
-    replies = ForumPostSerializer(many=True, read_only=True)
+    replies = serializers.SerializerMethodField()
     is_resolved = serializers.SerializerMethodField()
+    likes_count = serializers.IntegerField(read_only=True)
+    liked_by_user = serializers.SerializerMethodField()
 
     class Meta:
         model = ForumThread
@@ -81,7 +91,7 @@ class ForumThreadSerializer(serializers.ModelSerializer):
             'id', 'author', 'category', 'category_detail', 'title', 'content', 'content_type',
             'status', 'course', 'lesson', 'quiz', 'quiz_question', 'accepted_post',
             'is_resolved', 'is_closed', 'views_count', 'replies_count', 'replies',
-            'created_at', 'updated_at', 'last_activity_at',
+            'likes_count', 'liked_by_user', 'created_at', 'updated_at', 'last_activity_at',
         ]
         read_only_fields = [
             'id', 'author', 'status', 'accepted_post', 'is_resolved', 'views_count',
@@ -117,6 +127,19 @@ class ForumThreadSerializer(serializers.ModelSerializer):
 
     def get_is_resolved(self, obj):
         return bool(obj.accepted_post_id)
+
+    def get_liked_by_user(self, obj):
+        request = self.context.get('request')
+        return bool(request and request.user.is_authenticated and CommunityLike.objects.filter(user=request.user, thread=obj).exists())
+
+    def get_replies(self, obj):
+        posts = obj.posts.select_related('author').annotate(likes_count=Count('likes'))
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            posts = posts.filter(status='PUBLISHED')
+        elif not request.user.is_staff:
+            posts = posts.filter(Q(status='PUBLISHED') | Q(author=request.user))
+        return ForumPostSerializer(posts, many=True, context=self.context).data
 
 
 class CommunityReportSerializer(serializers.ModelSerializer):

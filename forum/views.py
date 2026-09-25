@@ -1,13 +1,13 @@
 from django.core.cache import cache
 from django.db import transaction
-from django.db.models import F, Q
+from django.db.models import Count, F, Q
 from django.utils import timezone
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 
-from .models import CommunityCategory, CommunityModerationAction, CommunityReport, ForumPost, ForumThread
+from .models import CommunityCategory, CommunityLike, CommunityModerationAction, CommunityReport, ForumPost, ForumThread
 from .serializers import CommunityCategorySerializer, CommunityReportSerializer, ForumPostSerializer, ForumThreadSerializer
 
 
@@ -23,7 +23,7 @@ class ForumThreadViewSet(viewsets.ModelViewSet):
 	http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
 
 	def get_queryset(self):
-		queryset = ForumThread.objects.select_related('author', 'category', 'course', 'lesson', 'quiz', 'quiz_question').prefetch_related('posts__author')
+		queryset = ForumThread.objects.select_related('author', 'category', 'course', 'lesson', 'quiz', 'quiz_question').prefetch_related('posts__author').annotate(likes_count=Count('likes'))
 		user = self.request.user
 		if user.is_authenticated and user.is_staff:
 			scoped = queryset
@@ -79,7 +79,8 @@ class ForumThreadViewSet(viewsets.ModelViewSet):
 	def replies(self, request, pk=None):
 		thread = self.get_object()
 		if request.method == 'GET':
-			return Response(ForumPostSerializer(thread.posts.filter(status='PUBLISHED'), many=True).data)
+			posts = thread.posts.filter(status='PUBLISHED').select_related('author').annotate(likes_count=Count('likes'))
+			return Response(ForumPostSerializer(posts, many=True, context={'request': request}).data)
 		if thread.is_closed or thread.status in {'LOCKED', 'REMOVED', 'HIDDEN'}:
 			return Response({'detail': 'Cette discussion est fermée aux nouvelles réponses.'}, status=status.HTTP_400_BAD_REQUEST)
 		key = f'community-post-rate:{request.user.id}'
@@ -90,7 +91,15 @@ class ForumThreadViewSet(viewsets.ModelViewSet):
 		cache.set(key, True, timeout=10)
 		post = serializer.save(thread=thread, author=request.user, status='PUBLISHED')
 		ForumThread.objects.filter(pk=thread.pk).update(replies_count=F('replies_count') + 1, last_activity_at=timezone.now())
-		return Response(ForumPostSerializer(post).data, status=status.HTTP_201_CREATED)
+		return Response(ForumPostSerializer(post, context={'request': request}).data, status=status.HTTP_201_CREATED)
+
+	@action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated], url_path='like')
+	def like(self, request, pk=None):
+		thread = self.get_object()
+		like, created = CommunityLike.objects.get_or_create(user=request.user, thread=thread)
+		if not created:
+			like.delete()
+		return Response({'liked': created, 'likes_count': CommunityLike.objects.filter(thread=thread).count()})
 
 	@action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated], url_path='report')
 	def report(self, request, pk=None):
@@ -121,7 +130,7 @@ class ForumPostViewSet(viewsets.ModelViewSet):
 	http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
 
 	def get_queryset(self):
-		queryset = ForumPost.objects.select_related('author', 'thread')
+		queryset = ForumPost.objects.select_related('author', 'thread').annotate(likes_count=Count('likes'))
 		if self.request.user.is_staff:
 			return queryset
 		return queryset.filter(Q(status='PUBLISHED') | Q(author=self.request.user))
@@ -139,6 +148,14 @@ class ForumPostViewSet(viewsets.ModelViewSet):
 			raise PermissionDenied('Tu ne peux supprimer que tes propres réponses.')
 		instance.status = 'REMOVED'
 		instance.save(update_fields=['status', 'updated_at'])
+
+	@action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated], url_path='like')
+	def like(self, request, pk=None):
+		post = self.get_object()
+		like, created = CommunityLike.objects.get_or_create(user=request.user, post=post)
+		if not created:
+			like.delete()
+		return Response({'liked': created, 'likes_count': CommunityLike.objects.filter(post=post).count()})
 
 	@action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated], url_path='accept')
 	def accept(self, request, pk=None):
